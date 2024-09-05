@@ -1,0 +1,1472 @@
+---
+title: "Hawaiian Flight Forecasting"
+author: "Nicholas Consiglio, Matthew Schmitt, and Pawarisa Sears"
+output: html_notebook
+---
+
+# Librarys and imports
+
+#Loading all the libraries 
+```{r message=FALSE}
+library(dplyr)
+library(gridExtra)
+library(ggplot2)
+library(forecast)
+library(fpp2)
+library(tseries)
+library(urca)
+library(openxlsx)
+library(shiny)
+library(leaflet)
+library(geosphere)
+library(maps)
+library(sf)
+library(stringr)
+library(forcats)
+library(plotly)
+library(tidyverse)
+library(knitr)  
+library(rnaturalearth)      
+library(rnaturalearthdata)
+library(scales)
+```
+
+#Importing the dataset
+```{r}
+air <- read.csv("US_Monthly_Air_Passengers00_19.csv")
+air
+```
+
+#Filtering the data
+```{r}
+air <- air[!is.na(air$Sum_PASSENGERS) & air$Sum_PASSENGERS != 0, ]
+
+all_hawaii_flights <- subset(air, select = -c(DEST_COUNTRY, DEST_STATE_ABR, ORIGIN_COUNTRY, ORIGIN_STATE_ABR,AIRLINE_ID))
+
+all_hawaii_flights <- all_hawaii_flights %>%
+  filter(ORIGIN_STATE_NM == "Hawaii" | DEST_STATE_NM == "Hawaii")
+
+all_hawaii <- air %>%
+  filter(ORIGIN_STATE_NM == "Hawaii" | DEST_STATE_NM == "Hawaii")
+all_hawaii
+
+hawaii_Dest <- air %>%
+  filter(DEST_STATE_NM == "Hawaii")
+
+hawaii_Org <- air %>%
+  filter(ORIGIN_STATE_NM == "Hawaii")
+
+hawaii_local <- air %>%
+  filter(ORIGIN_STATE_NM == "Hawaii",
+         DEST_STATE_NM == "Hawaii")
+```
+
+#creating csv files of our datasets
+```{r}
+#write.csv(all_hawaii_flights, 'all_hawaii_flights.csv', row.names = FALSE)
+#write.csv(hawaii_Dest, 'hawaii_Dest.csv', row.names = FALSE)
+```
+
+
+#importing/merging external data
+```{r}
+#cost and time dataset
+more_info <- read.xlsx('Hawaii Flights.xlsx')
+
+more_info$Total_Minutes <- (more_info$Hours * 60) + more_info$Minutes
+hawaii_dest_final <- left_join(hawaii_Dest, more_info, by = c("ORIGIN" = "Airport.Codes"))
+```
+
+# Introduction
+
+#Here is our groups code for the exploratory data analysis, spataial mapping, and forecasting.
+#The code starts above with all of our imports and some filtering to focus on Hawaii, then EDA, Spatial, and forecasting.
+#certain lines are commented out to prevent output.
+
+
+
+# Exploratory Data Analysis
+
+```{r}
+all_hawaii_origin <- all_hawaii %>%
+  filter(ORIGIN_STATE_NM  == "Hawaii")
+
+unique_hawaii_cities <- all_hawaii_origin %>%
+  group_by(ORIGIN) %>%
+  distinct(ORIGIN_CITY_NAME)
+
+print(unique_hawaii_cities)
+```
+
+
+#Number of Flights In and Out of Hawaii
+```{r}
+all_hawaii_flights$CARRIER_NAME <- fct_rev(fct_infreq(all_hawaii_flights$CARRIER_NAME))
+
+grouped_data <- all_hawaii_flights %>%
+    group_by(CARRIER_NAME) %>% 
+    summarize(count = n())
+
+grouped_data <- tail(grouped_data, 10)
+
+grouped_data <- grouped_data %>%
+    mutate(top_3 = ifelse(row_number() < 8, "Top 3", "Others"))
+
+ggplot(grouped_data, aes(x = count, y = CARRIER_NAME, fill = top_3)) + 
+    geom_bar(stat = 'identity') +
+    labs(title = "Top 10 Airlines Going in And Out of Hawaii",
+         x = 'Number of Flights',
+         y = '') +
+    scale_fill_manual(values = c('lightblue', 'gray'),
+                      labels = c('Top 3', 'Others'))
+```
+
+#Top 10 Airlines going into Hawaii
+```{r}
+hawaii_Dest$CARRIER_NAME <- fct_rev(fct_infreq(hawaii_Dest$CARRIER_NAME))
+
+grouped_data2 <- hawaii_Dest %>%
+    group_by(CARRIER_NAME) %>%
+    summarize(count = n())
+
+grouped_data2 <- tail(grouped_data2, 10)
+
+grouped_data2 <- grouped_data2 %>%
+    mutate(top_3 = ifelse(row_number() < 8, "Top 3", "Others"))
+
+ggplot(grouped_data2, aes(x = count, y = CARRIER_NAME, fill = top_3)) +
+  geom_bar(stat = 'identity') +
+  labs(title = 'Top 10 Airlines Going Into Hawaii',
+       x = 'Number of Flights') +
+  scale_fill_manual(values = c('hotpink', 'gray'),
+                   labels = c('Top 3', 'Others'))
+```
+
+#Top 10 Airlines Going out of Hawaii
+```{r}
+hawaii_Org$CARRIER_NAME <- fct_rev(fct_infreq(hawaii_Org$CARRIER_NAME))
+
+grouped_data3 <- hawaii_Org %>%
+    group_by(CARRIER_NAME) %>%
+    summarize(count = n())
+
+grouped_data3 <- tail(grouped_data3, 10)
+
+grouped_data3 <- grouped_data3 %>%
+    mutate(top_3 = ifelse(row_number() >= 8, "Top 3", "Others"))
+
+ggplot(grouped_data3, aes(x = count, y = CARRIER_NAME, fill = top_3)) +
+  geom_bar(stat = 'identity') +
+  labs(title = 'Top 10 Airlines Going out of Hawaii',
+       x = "Number of Flights",
+       y = '') +
+  scale_fill_manual(values = c('gray', 'orange'),
+                     labels = c('Others', 'Top 3'))
+
+```
+
+#Top Airlines traveling between islands in Hawaii
+```{r}
+hawaii_local$CARRIER_NAME <- fct_rev(fct_infreq(hawaii_local$CARRIER_NAME))
+
+grouped_data4 <- hawaii_local %>%
+    group_by(CARRIER_NAME) %>% 
+    summarize(count = n())
+
+grouped_data4 <- grouped_data4 %>%
+    mutate(top_3 = ifelse(row_number(desc(count)) <= 3, "Top 3", "Others"))
+
+ggplot(grouped_data4, aes(x = count, y = CARRIER_NAME, fill = top_3)) +
+  geom_bar(stat = 'identity') +
+  labs(title = "Top Airlines Going Around Locally in Hawaii",
+       x = 'Number of Flights',
+       y = '') +
+  scale_fill_manual(values = c('gray', 'yellow'),
+                    labels = c('Others', 'Top 3'))
+```
+
+
+#Where are Most people coming from?
+```{r}
+hawaii_Dest$ORIGIN_CITY_NAME <- fct_rev(fct_infreq(hawaii_Dest$ORIGIN_CITY_NAME))
+
+grouped_data5 <- hawaii_Dest %>%
+  group_by(ORIGIN_CITY_NAME) %>%
+  summarize(count = n())
+
+grouped_data5 <- tail(grouped_data5, 10)
+
+grouped_data5 <- grouped_data5 %>%
+  mutate(top_3 = ifelse(row_number() >= 8, 'Top 3', 'Others'))
+
+ggplot(grouped_data5, aes(x = count, y = ORIGIN_CITY_NAME, fill = top_3)) +
+  geom_bar(stat = 'identity') +
+  labs(title = 'Top Places Where People are Coming from',
+       x = "Number of Flights",
+       y = '') +
+  scale_fill_manual(values = c('gray', 'limegreen'),
+                    labels = c('Top 3', 'Others'))
+```
+
+#Where Most people are going to FROM Hawaii
+```{r}
+hawaii_Org$DEST_CITY_NAME <- fct_rev(fct_infreq(hawaii_Org$DEST_CITY_NAME))
+
+grouped_data6 <- hawaii_Org %>%
+  group_by(DEST_CITY_NAME) %>%
+  summarize(count = n())
+
+grouped_data6 <- tail(grouped_data6, 10)
+
+grouped_data6 <- grouped_data6 %>%
+  mutate(top_3 = ifelse(row_number() >= 8, 'Top 3', 'Others'))
+
+ggplot(grouped_data6, aes(x = count, y = DEST_CITY_NAME, fill = top_3)) +
+  geom_bar(stat = 'identity') +
+  labs(title = "Top Places Where People are Going from Hawaii",
+       x = "Number of Flights",
+       y = '') +
+  scale_fill_manual(values = c('gray', 'skyblue'),
+                    labels = c('Others', 'Top 3'))
+```
+#Cheapest Flight Tickets
+```{r}
+cheapest_ticket <- hawaii_dest_final %>%
+  arrange(Price) %>%
+  select(4, 7, 20) %>%
+  unique()
+
+top_10_cheapest <- head(cheapest_ticket, 10)
+top_10_cheapest$ORIGIN <- factor(top_10_cheapest$ORIGIN, levels = unique(top_10_cheapest$ORIGIN))
+top_10_cheapest <- top_10_cheapest[order(top_10_cheapest$Price, decreasing = TRUE),]
+
+ggplot(top_10_cheapest, aes(x = Price, y = ORIGIN)) +
+  geom_bar(stat = 'identity', fill = 'limegreen') +
+  geom_text(aes(label = paste('$',Price)), hjust = 1.1) +
+  geom_text(aes(label = paste(ORIGIN_STATE_NM)), hjust = 2.2) +
+  labs(title = "Cheapest Flight Tickets to Honolulu",
+       x = "Ticket Price",
+       y = "Airport Origin")
+```
+
+
+
+#What is the Most popular time of Year People Travel to Hawaii
+```{r message=FALSE}
+to_hawaii <- hawaii_Dest %>%
+  group_by(YEAR) %>% 
+  summarise(total_passengers = sum(Sum_PASSENGERS, na.rm = TRUE))
+
+ggplot(to_hawaii, aes(x = YEAR, y = total_passengers)) +
+  geom_line(color = 'orange', size = 0.5) +
+  geom_point(color = 'orange', size = 2) +
+  labs(title = "Total Number of Passengers Throughout the Years to Hawaii",
+       x = "Years",
+       y = "Total Number of Passengers") +
+  theme(axis.text.y = element_text(size = 8)) 
+```
+
+#Number of Flights throughout the years
+```{r}
+to_hawaii_flights <-  hawaii_Dest %>%
+  group_by(YEAR) %>%
+  summarize(count = n())
+
+ggplot(to_hawaii_flights, aes(x = YEAR, y = count)) +
+  geom_line(color = 'hotpink') +
+  geom_point(color = 'hotpink', size = 2) +
+  labs(title = 'Number of Flights through the Years',
+       x = 'Years',
+       y = 'Number of Flights')
+```
+#Monthly ALL flights each year
+```{r}
+flights_per_month_year <- all_hawaii %>%
+  group_by(YEAR, MONTH) %>%
+  summarise(n_flights = n(), .groups = "drop")
+
+flights_per_month_year$MONTH <- factor(month.name[flights_per_month_year$MONTH], levels = month.name)
+
+ggplot(flights_per_month_year, aes(x = YEAR, y = n_flights, color = MONTH)) +
+  geom_line() +
+  scale_color_discrete(name = "Month") +
+  labs(title = "Monthly Flights in each Year",
+       x = "Year",
+       y = "Number of Flights") +
+  theme_minimal()
+```
+
+
+
+#From Hawaii Domestic/International Year and month
+```{r}
+us_states <- c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", 
+               "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", 
+               "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", 
+               "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", 
+               "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", 
+               "DC", "GU", "MP", "PR", "VI")
+
+if (!is.character(hawaii_Org$DEST_CITY_NAME)) {
+  hawaii_Org$DEST_CITY_NAME <- as.character(hawaii_Org$DEST_CITY_NAME)
+}
+
+hawaii_Org$DEST_CITY_NAME <- trimws(hawaii_Org$DEST_CITY_NAME)
+
+if (any(nchar(hawaii_Org$DEST_CITY_NAME) == 0)) {
+  stop("DEST_CITY_NAME contains empty strings.")
+}
+
+split_names <- strsplit(hawaii_Org$DEST_CITY_NAME, ", ")
+
+hawaii_Org$STATE <- sapply(split_names, function(x) if(length(x) > 1) x[[2]] else NA)
+
+hawaii_Org <- hawaii_Org %>%
+  mutate(flight_type = ifelse(STATE %in% us_states, "Domestic", "International"))
+
+summary_data_year <- hawaii_Org %>%
+  group_by(YEAR, flight_type) %>%
+  summarise(total_passengers = sum(Sum_PASSENGERS), .groups = "drop")
+
+#summary_data_year
+
+summary_year_table <- summary_data_year %>%
+  pivot_wider(names_from = flight_type, values_from = total_passengers)
+
+#summary_year_table
+
+#kable(summary_data_year, caption = "Summary Data by Year and Flight Type")
+#kable(summary_year_table, caption = "Summary Table by Year and Flight Type")
+
+summary_data_month<- hawaii_Org %>%
+  group_by(MONTH, flight_type) %>%
+  summarise(total_passengers = sum(Sum_PASSENGERS), .groups = "drop")
+
+#summary_data_month
+
+summary_month_table <- summary_data_month %>%
+  pivot_wider(names_from = flight_type, values_from = total_passengers)
+
+#summary_month_table
+
+#kable(summary_data_month, caption = "Summary Data by Month and Flight Type")
+#kable(summary_month_table, caption = "Summary Table by Month and Flight Type")
+
+domestic_data <- hawaii_Org %>%
+     filter(flight_type == "Domestic")
+
+international_data <- hawaii_Org %>%
+     filter(flight_type == "International")
+
+
+print(domestic_data)
+print(international_data)
+```
+
+#Domestic airline travel
+```{r message=FALSE}
+# Define month labels
+month_labels <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+domestic_flights_per_month_carrier <- domestic_data %>%
+  group_by(MONTH, CARRIER_NAME) %>%
+  summarise(num_flights = n())
+
+# Plot of domestic flights per month using Carrier Name as legend
+ggplot(domestic_flights_per_month_carrier, 
+       aes(x = MONTH, y = num_flights, group = CARRIER_NAME, color = CARRIER_NAME)) +
+  geom_line() +
+  labs(title = "Monthly Domestic flights by airline",
+       x = "Month",
+       y = "Number of Flights") +
+  scale_x_continuous(breaks = 1:12, labels = month_labels) +
+  ylim(0, 1000) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_discrete(name = "Airline")
+
+```
+
+#International airline
+```{r message=FALSE}
+international_flights_per_month_carrier <- international_data %>%
+  group_by(MONTH, CARRIER_NAME) %>%
+  summarise(num_flights = n())
+
+# Plot of international flights per month using Carrier Name as legend
+international_month_plot <- ggplot(international_flights_per_month_carrier, aes(x = MONTH, y = num_flights, group = CARRIER_NAME, color = CARRIER_NAME)) +
+              geom_line() +
+              labs(title = "Monthly International flights by Airline",
+                   x = "Month",
+                   y = "Number of Flights") +
+                   
+              scale_x_continuous(breaks = 1:12, labels = month_labels) +
+              ylim(0, 200) +
+              theme_minimal() +
+              theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+              scale_color_discrete(name = "Airline")
+
+international_month_plot
+```
+
+#flights for each carrier and month
+```{r message=FALSE}
+# Calculate the number of flights for each carrier and month
+flights_per_month_carrier <- all_hawaii %>%
+  group_by(MONTH, CARRIER_NAME) %>%
+  summarise(num_flights = n())
+
+# Plot of flights per month using Carrier Name as legend
+month_plot <- ggplot(flights_per_month_carrier, aes(x = MONTH, y = num_flights, group = CARRIER_NAME, color = CARRIER_NAME)) +
+              geom_line() +
+              labs(title = "Flights per Month by Carrier",
+                   x = "Month",
+                   y = "Number of Flights"
+                   ) +
+              scale_x_continuous(breaks = 1:12, labels = month_labels) +
+              ylim(0, 2000) +
+              theme_minimal() +
+              theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+              scale_color_discrete(name = "Carrier Name")
+
+month_plot
+```
+
+#domestic
+```{r message=FALSE}
+# domestic
+domestic_y_m <- domestic_data %>% 
+                 group_by(YEAR, MONTH) %>% 
+                 summarise(total_passengers = sum(Sum_PASSENGERS))
+
+# Plot the line graph
+ggplot(domestic_y_m, aes(x = YEAR, y = total_passengers, color = as.factor(MONTH))) +
+  geom_line() +
+  scale_color_manual(values = rainbow(12)) +  # Using rainbow color palette for months
+  labs(x = "Year", y = "Total Passengers", color = "Month") +
+  theme_minimal() +
+  ggtitle("Domestic Flights")
+
+```
+#international
+```{r message=FALSE}
+# Assuming the correct column name is Sum_PASSENGERS
+international_y_m <- international_data %>% 
+                      group_by(YEAR, MONTH) %>% 
+                      summarise(total_passengers = sum(Sum_PASSENGERS))
+
+# Plot the line graph
+ggplot(international_y_m, aes(x = YEAR, y = total_passengers, color = as.factor(MONTH))) +
+  geom_line() +
+  scale_color_manual(values = rainbow(12)) +  # Using rainbow color palette for months
+  labs(x = "Year", y = "Total Passengers", color = "Month") +
+  theme_minimal() +
+  ggtitle("International Flights")
+
+
+```
+
+#What month is most popular
+```{r message=FALSE}
+passengers_per_month <- all_hawaii %>%
+  group_by(MONTH) %>%
+  summarise(total_passengers = sum(Sum_PASSENGERS))
+
+# Generating a vector of summer months (e.g., June, July, August)
+summer_months <- c(6, 7, 8)  # Assuming June, July, and August are the summer months
+
+# Plot of total passengers arriving in Hawaii per month
+ggplot(passengers_per_month, aes(x = MONTH, y = total_passengers)) +
+  geom_line() +
+  geom_rect(xmin = min(summer_months) - 0.5, xmax = max(summer_months) + 0.5, ymin = -Inf, ymax = Inf, 
+            fill = "lightpink", alpha = 0.05) +  # Shaded region for summer months
+  labs(title = "Total Passengers in Hawaii",
+       x = "Month",
+       y = "Total Passengers") +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_y_continuous(labels = comma) +  # Format y-axis labels with commas
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+#international passengers per month
+```{r}
+# Calculate the total number of passengers arriving in Hawaii each month for international flights
+international_passengers_per_month <- international_data %>%
+  group_by(MONTH) %>%
+  summarise(total_passengers = sum(Sum_PASSENGERS))
+
+# Plot of total passengers arriving in Hawaii per month for international flights
+international_passenger_month_plot <- ggplot(international_passengers_per_month, aes(x = MONTH, y = total_passengers)) +
+  geom_line() +
+  geom_rect(xmin = min(summer_months) - 0.5, xmax = max(summer_months) + 0.5, ymin = -Inf, ymax = Inf, 
+            fill = "lightyellow", alpha = 0.05) +  # Shaded region for summer months
+  labs(title = "International Passengers Arriving in Hawaii per month",
+       x = "Month",
+       y = "Total Passengers") +
+  scale_x_continuous(breaks = 1:12, labels = month_labels) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+international_passenger_month_plot
+
+```
+
+
+
+
+# Spatial Aspects
+
+
+#More Cleaning and adding coordinates and manually adding coordinates
+```{r message=FALSE}
+indices_with_slash <- grepl("/", air$DEST_CITY_NAME)
+rows_with_slash <- air[indices_with_slash, ]
+
+split_names <- strsplit(rows_with_slash$DEST_CITY_NAME, "/")
+
+city_names <- sapply(split_names, function(x) x[1])
+state_abbr <- substr(rows_with_slash$DEST_CITY_NAME, nchar(rows_with_slash$DEST_CITY_NAME) - 1, nchar(rows_with_slash$DEST_CITY_NAME))
+
+combined_names <- paste(city_names, state_abbr, sep = " ")
+
+air[grepl("/", air$DEST_CITY_NAME), "DEST_CITY_NAME"] <- combined_names
+
+air <- air %>%
+  mutate(DEST_CITY_NAME = gsub(",", "", DEST_CITY_NAME))
+
+air <- air %>%
+  mutate(DEST_CITY_NAME = gsub("\\.", "", DEST_CITY_NAME))
+
+all_hawaii_flights <- subset(air, select = -c(DEST_COUNTRY, DEST_STATE_ABR, 
+                                                     ORIGIN_COUNTRY, ORIGIN_STATE_ABR,
+                                                  AIRLINE_ID))
+origin_passengers <- air %>%
+  filter(!is.na(ORIGIN)) %>%  
+  group_by(ORIGIN, ORIGIN_CITY_NAME) %>%
+  summarise(Total_Passengers = sum(Sum_PASSENGERS, na.rm = TRUE)) %>%
+  arrange(desc(Total_Passengers))  
+hawaiian_airports <- c("HNL", "KOA", "OGG", "LIH", "ITO", "LNY", "MKK", "NGF", "JRF")
+
+from_hawaii <- air %>%
+  filter(ORIGIN %in% hawaiian_airports)
+
+to_hawaii <- air %>%
+  filter(DEST %in% hawaiian_airports)
+
+pass_by_dest_city <- from_hawaii %>%
+  group_by(DEST, DEST_CITY_NAME, DEST_COUNTRY_NAME) %>%
+  summarise(Total_Passengers = sum(Sum_PASSENGERS, na.rm = TRUE)) %>%
+  arrange(desc(Total_Passengers))  
+us_cities <- us.cities
+
+pass_by_dest_city$DEST_CITY_NAME <- tolower(pass_by_dest_city$DEST_CITY_NAME)
+
+us_cities$name <- tolower(us_cities$name)
+
+pass_by_dest_city_map <- merge(pass_by_dest_city, us_cities, by.x = "DEST_CITY_NAME", by.y = "name", all.x = TRUE)
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST %in% c("HNL", "OGG", "KOA", "LIH", "ITO")] <- c(21.3175, 20.8983, 19.7383, 21.9758, 19.7205)
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST %in% c("HNL", "OGG", "KOA", "LIH", "ITO")] <- c(-157.9205, -156.4315, -156.0415, -159.3390, -155.0484)
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "FUK"] <- 37.7608
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "FUK"] <- 140.4748
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MNL"] <- 14.5123
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MNL"] <- 121.0165
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "NGO"] <- 34.8589
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "NGO"] <- 136.8136
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KIX"] <- 34.4353
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KIX"] <- 135.2440
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "ICN"] <- 37.4488
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "ICN"] <- 126.4513
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "SYD"] <- -33.9400
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "SYD"] <- 151.1754
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "TPE"] <- 25.0772
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "TPE"] <- 121.2322
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "NRT"] <- 35.7702
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "NRT"] <- 140.3843
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "HND"] <- 35.5494
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "HND"] <- 139.7798
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "YVR"] <- 49.1934
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "YVR"] <- -123.1751
+
+# Add latitudes and longitudes for the new airports
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "PPG"] <- -14.3290
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "PPG"] <- -170.7133
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "PEK"] <- 40.0799
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "PEK"] <- 116.6031
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "BNE"] <- -27.4026
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "BNE"] <- 153.1081
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "AKL"] <- -37.0089
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "AKL"] <- 174.7864
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "CTS"] <- 42.7791
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "CTS"] <- 141.6866
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "PPT"] <- -17.5595
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "PPT"] <- -149.6094
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "YYC"] <- 51.1326
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "YYC"] <- -114.0139
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "STL"] <- 38.7499
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "STL"] <- -90.3748
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "YYZ"] <- 43.6771
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "YYZ"] <- -79.6334
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "SEL"] <- 37.4488
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "SEL"] <- 126.4513
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MKK"] <- 21.1556
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MKK"] <- -157.0931
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "SDJ"] <- 38.1385
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "SDJ"] <- 140.9160
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "LNY"] <- 20.7906
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "LNY"] <- -156.9499
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "GUM"] <- 13.4856
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "GUM"] <- 144.8001
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "APW"] <- -13.8300
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "APW"] <- -172.0015
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "HIJ"] <- 34.4373
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "HIJ"] <- 132.9206
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KWA"] <- 8.7207
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KWA"] <- 167.7314
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MAJ"] <- 7.0661
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MAJ"] <- 171.2769
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KIJ"] <- 37.9525
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KIJ"] <- 139.1133
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "YEG"] <- 53.3062
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "YEG"] <- -113.5828
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "JON"] <- 16.7286
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "JON"] <- -169.5208
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "CXI"] <- 1.9857
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "CXI"] <- -157.3505
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MEL"] <- -37.6700
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MEL"] <- 144.8494
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "PVG"] <- 31.1443
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "PVG"] <- 121.8083
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "CAN"] <- 23.3959
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "CAN"] <- 113.3080
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "OKA"] <- 26.2001
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "OKA"] <- 127.6466
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "RAR"] <- -21.2022
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "RAR"] <- -159.8046
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "LHR"] <- 51.4680
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "LHR"] <- -0.4551
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "HKD"] <- 22.3135
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "HKD"] <- 113.9137
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "AXT"] <- 39.6145
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "AXT"] <- 140.2177
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KMQ"] <- 36.3928
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KMQ"] <- 136.4060
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MDY"] <- 28.2021
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MDY"] <- -177.3804
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KMJ"] <- 32.8350
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KMJ"] <- 130.8590
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "PNI"] <- 6.9846
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "PNI"] <- 158.2089
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "FKS"] <- 44.6246
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "FKS"] <- -86.1970
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "NAN"] <- -17.7528
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "NAN"] <- 177.4510
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "AKJ"] <- 43.6704
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "AKJ"] <- 142.4546
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "FSZ"] <- 34.7965
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "FSZ"] <- 138.1853
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "OBO"] <- 42.7313
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "OBO"] <- 143.2178
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "TKK"] <- 7.4577
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "TKK"] <- 151.8418
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "OIT"] <- 33.4797
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "OIT"] <- 131.7362
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KCZ"] <- 33.5476
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KCZ"] <- 133.6741
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "HNA"] <- 39.4214
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "HNA"] <- 141.1385
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "TOY"] <- 36.64833
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "TOY"] <- 137.1875
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KOJ"] <- 31.8007
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KOJ"] <- 130.7203
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MYJ"] <- 33.8290
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MYJ"] <- 132.7045
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "AOJ"] <- 40.7355
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "AOJ"] <- 140.6904
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "NGS"] <- 32.9140
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "NGS"] <- 129.9229
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "UBJ"] <- 33.9334
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "UBJ"] <- 131.2751
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "OKJ"] <- 34.7580
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "OKJ"] <- 133.8558
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "HKG"] <- 22.3135
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "HKG"] <- 113.9137
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KSA"] <- 5.3530
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KSA"] <- 162.9563
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "BKK"] <- 13.6923
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "BKK"] <- 100.7507
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "TAK"] <- 16.8960
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "TAK"] <- 99.2533
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KKJ"] <- 33.8455
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KKJ"] <- 131.0350
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "OSA"] <- 34.4353
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "OSA"] <- 135.2440
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MMB"] <- 43.8816
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MMB"] <- 144.1586
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KMI"] <- 31.9077
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KMI"] <- 131.4202
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "IZO"] <- 35.4136
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "IZO"] <- 132.8888
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "TKS"] <- 34.1345
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "TKS"] <- 134.6180
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KHH"] <- 22.5749
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KHH"] <- 120.3472
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "KUH"] <- 43.0451
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "KUH"] <- 144.1963
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MSJ"] <- 40.6965
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MSJ"] <- 141.3878
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "OKO"] <- 35.7485
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "OKO"] <- 139.3480
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "IWA"] <- 57.0051
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "IWA"] <- 40.9766
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "PUS"] <- 35.1729
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "PUS"] <- 128.9472
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "SSN"] <- 37.4458
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "SSN"] <- 127.1144
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "LWS"] <- 46.3773
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "LWS"] <- -117.0112
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "IWK"] <- 34.1588
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "IWK"] <- 132.2347
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "ADW"] <- 38.8122
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "ADW"] <- -76.8671
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "YXX"] <- 49.0225
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "YXX"] <- -122.3793
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "FAI"] <- 64.8155
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "FAI"] <- -147.8595
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "CBR"] <- -35.3053
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "CBR"] <- 149.1933
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "MUC"] <- 48.3536
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "MUC"] <- 11.7832
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "SJU"] <- 18.4378
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "SJU"] <- -66.0042
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "SIN"] <- 1.3545
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "SIN"] <- 103.9886
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "AWK"] <- 19.2812
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "AWK"] <- 166.6448
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "GMP"] <- 37.5655
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "GMP"] <- 126.8013
+
+pass_by_dest_city_map$lat[pass_by_dest_city_map$DEST == "ROR"] <- 7.3643
+pass_by_dest_city_map$long[pass_by_dest_city_map$DEST == "ROR"] <- 134.5327
+
+missing_coords <- pass_by_dest_city_map[is.na(pass_by_dest_city_map$lat) | is.na(pass_by_dest_city_map$long), ]
+missing_coords_ordered <- missing_coords[order(-missing_coords$Total_Passengers), ]
+pass_by_dest_city_map_filtered <- pass_by_dest_city_map[pass_by_dest_city_map$Total_Passengers >= 1, ]
+
+city_coords <- data.frame(
+  DEST_CITY_NAME = c("san juan pr", "st louis mo", "myrtle beach sc", "nantucket ma", "bangor me"),
+  lat = c(18.4655, 38.6270, 33.6891, 41.2835, 44.8016),
+  long = c(-66.1057, -90.1994, -78.8867, -70.0995, -68.7703)
+)
+
+city_coords <- city_coords[order(tolower(city_coords$DEST_CITY_NAME)), ]
+missing_coords_mask <- is.na(pass_by_dest_city_map_filtered$lat) | is.na(pass_by_dest_city_map_filtered$long)
+pass_by_dest_city_map_filtered$lat[missing_coords_mask] <- city_coords$lat[match(tolower(pass_by_dest_city_map_filtered$DEST_CITY_NAME[missing_coords_mask]), tolower(city_coords$DEST_CITY_NAME))]
+pass_by_dest_city_map_filtered$long[missing_coords_mask] <- city_coords$long[match(tolower(pass_by_dest_city_map_filtered$DEST_CITY_NAME[missing_coords_mask]), tolower(city_coords$DEST_CITY_NAME))]
+pass_by_dest_city_map_filtered
+```
+
+
+#Hawaii Route
+```{r}
+hawaii_codes <- all_hawaii %>% 
+  mutate(Route = paste(ORIGIN, DEST, sep = "-"))
+
+#str(hawaii_codes)
+```
+
+
+#all hawaii
+```{r message=FALSE}
+all_route_counts <- all_hawaii %>%
+                     group_by(ORIGIN, DEST) %>%
+                     summarise(Count = n()) %>%
+                     arrange(desc(Count))  
+
+all_route_counts <- arrange(all_route_counts, desc(Count))
+
+#print(all_route_counts)
+```
+
+#All Route
+```{r}
+all_route_counts_unique <- all_route_counts %>%
+  mutate(Route = ifelse(ORIGIN < DEST, paste(ORIGIN, DEST, sep = "-"), paste(DEST, ORIGIN, sep = "-"))) %>%
+  group_by(Route) %>%
+  summarise(Count = sum(Count)) %>%
+  arrange(desc(Count))
+
+#print(all_route_counts_unique)
+```
+
+#Destination is Hawaii
+```{r message=FALSE}
+hawaii_Dest <- air %>%
+  filter(DEST_STATE_NM == "Hawaii")
+
+dest_route_counts <- hawaii_Dest %>%
+  group_by(ORIGIN, DEST) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))  
+
+all_route_counts <- arrange(dest_route_counts, desc(Count))
+
+hnl_dest_counts <- air %>%
+  filter(DEST == "HNL", ) %>%
+  group_by(ORIGIN, DEST) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))  
+
+hnl_us_dest_counts <- air %>%
+  filter(DEST == "HNL" & ORIGIN_COUNTRY_NAME == "United States") %>%
+  group_by(ORIGIN, DEST) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))                
+
+#print(hnl_us_dest_counts)
+```
+
+
+#Map all Top US route
+```{r}
+coordinates <- data.frame(
+  city = c("HNL", "LAX", "SFO", "SEA", "PDX", "OAK", "LAS", "PHX", "DFW", "PPG", "ONT", "ATL", "SJC"), 
+  lon = c(-157.9225, -118.4085, -122.4091, -122.3086, -122.5944, -122.2195, -115.1482,
+          -112.0101, -97.0336, -170.7133, -117.5981, -84.419853, -121.9289),
+  lat = c(21.3187, 33.9422, 37.7749, 47.4484, 45.5883, 37.7191, 36.0831, 
+          33.4352, 32.8990, 14.3290, 34.0560, 33.6362, 37.3640)
+)
+
+top12_domestic <- leaflet() %>%
+  addTiles()  
+
+top12_domestic <- top12_domestic %>%
+  addMarkers(data = coordinates, lng = ~lon, lat = ~lat, label = ~city, 
+              labelOptions = labelOptions(noHide = TRUE))
+
+gcIntermediatePoints <- function(lon1, lat1, lon2, lat2) {
+  points <- gcIntermediate(c(lon1, lat1), c(lon2, lat2), n = 100, addStartEnd = TRUE)
+  return(data.frame(lon = points[, 1], lat = points[, 2]))
+}
+
+for (i in 2:nrow(coordinates)) {
+  points <- gcIntermediatePoints(coordinates$lon[1], coordinates$lat[1], 
+                                  coordinates$lon[i], coordinates$lat[i])
+ top12_domestic <- top12_domestic %>%
+    addPolylines(data = points, lng = ~lon, lat = ~lat, color = "red", weight = 1)
+}
+
+# Print the map
+top12_domestic
+```
+
+#map of wilmington internation airport to HNL
+```{r}
+coordinates_ILM <- data.frame(
+  city = c("HNL", "ILM"),
+  lon = c(-157.9225, -77.9105),  # Corrected longitude for ILM
+  lat = c(21.3187, 34.2670)
+)
+
+gcIntermediatePoints <- function(lon1, lat1, lon2, lat2) {
+  points <- gcIntermediate(c(lon1, lat1), c(lon2, lat2), n=100, addStartEnd=TRUE)
+  return(data.frame(lon=points[,1], lat=points[,2]))
+}
+
+points <- gcIntermediatePoints(coordinates_ILM$lon[1], coordinates_ILM$lat[1], 
+                               coordinates_ILM$lon[2], coordinates_ILM$lat[2])
+
+m_ILM <- leaflet() %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  addMarkers(lng=coordinates_ILM$lon, lat=coordinates_ILM$lat, 
+             label=coordinates_ILM$city, 
+             labelOptions = labelOptions(noHide = TRUE)) %>%
+  addPolylines(data=points, lng=~lon, lat=~lat, color="red", weight = 1)  # Adjust line thickness here
+
+m_ILM
+```
+
+
+#cheapest flight to HNL from ILM
+```{r}
+airport_coordinates <- data.frame(
+  airport = c("ILM", "EWR", "JFK", "HNL"), 
+  lon = c(-77.9038, -74.1686, -73.7781, -157.9225),
+  lat = c(34.2706, 40.6895, 40.6413, 21.3187)
+)
+
+gcIntermediatePoints <- function(lon1, lat1, lon2, lat2) {
+  points <- gcIntermediate(c(lon1, lat1), c(lon2, lat2), n = 100, addStartEnd = TRUE)
+  return(data.frame(lon = points[, 1], lat = points[, 2]))
+}
+
+bus_airports <- leaflet() %>%
+  addTiles()  
+
+bus_airports <- bus_airports %>%
+  addMarkers(data = airport_coordinates, lng = ~lon, lat = ~lat, 
+             label = ~airport, 
+             labelOptions = labelOptions(noHide = TRUE))
+
+routes <- list(c(1, 2), c(3, 4))
+
+for (route in routes) {
+  points <- gcIntermediatePoints(airport_coordinates$lon[route[1]], airport_coordinates$lat[route[1]], 
+                                 airport_coordinates$lon[route[2]], airport_coordinates$lat[route[2]])
+  bus_airports <- bus_airports %>%
+    addPolylines(data = points, lng = ~lon, lat = ~lat, color = "red", weight = 1)
+}
+
+bus_airports
+```
+
+
+#fastest flight to HNL from ILM
+```{r}
+airport_coordinates <- data.frame(
+  airport = c("ILM", "CLT", "LAX", "HNL"), 
+  lon = c(-77.9038, -80.9431, -118.4085, -157.9225),
+  lat = c(34.2706, 35.2140, 34.0522, 21.3187)
+)
+
+m_airports <- leaflet() %>%
+  addTiles()  
+
+m_airports <- m_airports %>%
+  addMarkers(data = airport_coordinates, lng = ~lon, lat = ~lat, 
+             label = ~airport, 
+             labelOptions = labelOptions(noHide = TRUE))
+
+gcIntermediatePoints <- function(lon1, lat1, lon2, lat2) {
+  points <- gcIntermediate(c(lon1, lat1), c(lon2, lat2), n = 100, addStartEnd = TRUE)
+  return(data.frame(lon = points[, 1], lat = points[, 2]))
+}
+
+routes <- list(c(1, 2), c(2, 3), c(3, 4))
+for (route in routes) {
+  points <- gcIntermediatePoints(airport_coordinates$lon[route[1]], airport_coordinates$lat[route[1]], 
+                                 airport_coordinates$lon[route[2]], airport_coordinates$lat[route[2]])
+  m_airports <- m_airports %>%
+    addPolylines(data = points, lng = ~lon, lat = ~lat, color = "red", weight = 1)
+}
+
+
+m_airports
+```
+
+```{r}
+ocean_polygon <- data.frame(
+  long = c(-180, -180, 180, 180, -180),  
+  lat = c(-90, 90, 90, -90, -90)  
+)
+world_map <- map_data("world")
+```
+
+
+#Airports with domestic flights to hawaii mapped
+```{r}
+filtered_destinations <- pass_by_dest_city_map_filtered %>%
+  filter(!(country.etc == "HI" & DEST != "HNL"))
+
+ggplot() +
+  geom_polygon(data = ocean_polygon, aes(x = long, y = lat),
+               fill = "lightblue", color = "lightblue") +  #
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               fill = "lightgreen", color = "darkgreen") +  
+  geom_point(data = filtered_destinations,
+             aes(x = long, y = lat),
+             color = "black", fill = "violet", alpha = 0.9, shape = 21, size = 3) + # Set size to 3 for all circles
+  theme_void() +
+  coord_fixed() +
+  labs(title = "Map of Domestic flights Involving Hawaii in 2000-2019")
+```
+
+#Airports with flights to hawaii mapped
+```{r}
+ggplot() +
+  geom_polygon(data = ocean_polygon, aes(x = long, y = lat),
+               fill = "lightblue", color = "lightblue") +  
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               fill = "lightgreen", color = "darkgreen") +  
+  geom_point(data = pass_by_dest_city_map_filtered,
+             aes(x = long, y = lat),
+             color = "black", fill = "violet", alpha = 0.9, shape = 21, stroke = 1) + 
+  theme_void() +
+  coord_fixed() +
+  labs(title = "Map of all airports with flights Involving Hawaii in 2000-2019")
+```
+
+
+
+#Airports with flights to hawaii mapped and scaled to passengers(hoverable)
+```{r message=FALSE}
+p <- ggplot() +
+  geom_polygon(data = ocean_polygon, aes(x = long, y = lat),
+               fill = "lightblue", color = "lightblue") +  
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               fill = "lightgreen", color = "darkgreen") +  
+  geom_point(data = pass_by_dest_city_map_filtered,
+             aes(x = long, y = lat, size = Total_Passengers, 
+                 text = paste("City:", DEST_CITY_NAME, "<br>",
+                              "Total Passengers:", Total_Passengers)),
+             color = "black", fill = "violet", alpha = 0.9, shape = 21, stroke = 1) +
+  scale_size_continuous(name = "Passengers (in millions)",
+                        breaks = c(1, 1000000, 2000000, 4000000, 8000000, 20000000),
+                        labels = c(0.5, 1, 2, 4, 8, 16),
+                        limits = c(0, 20e7)) +
+  theme_void() +
+  coord_fixed() +
+  labs(title = "Map of Airports by total Passenger Volume sclaing with flights Involving Hawaii in 2000-2019")
+
+ggplotly(p, tooltip = "text")
+```
+
+#Airports with flights to hawaii mapped and scaled to passengers(hoverable) and color based on domestic/international
+```{r}
+filtered_destinations <- pass_by_dest_city_map_filtered %>%
+  filter(!(DEST %in% c("OGG", "LIH", "KOA", "ITO", "MKK", "LNY")))
+
+p <- ggplot() +
+  geom_polygon(data = ocean_polygon, aes(x = long, y = lat),
+               fill = "lightblue", color = "lightblue") +  
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               fill = "lightgreen", color = "darkgreen") +  
+  geom_point(data = filtered_destinations,
+             aes(x = long, y = lat, 
+                 text = paste("City:", DEST_CITY_NAME, "<br>",
+                              "Total Passengers:", Total_Passengers),
+                 color = ifelse(DEST_COUNTRY_NAME == "United States" & DEST != "HNL", "darkblue",
+                                ifelse(DEST == "HNL", "red", "black"))), 
+             fill = "violet", alpha = 0.9, shape = 21, stroke = 1, size = 3) +
+  scale_color_identity() + 
+  theme_void() +
+  coord_fixed() +
+  labs(title = "Map of all airports with flights to HNL(red), domestic(darkblue), and international(black)")
+
+ggplotly(p, tooltip = "text")
+```
+
+
+
+#Airports with flights and flightlines to hawaii mapped and scaled to passengers(hoverable) and color based on domestic/international
+```{r}
+filtered_destinations <- pass_by_dest_city_map_filtered %>%
+  filter(!(DEST %in% c("OGG", "LIH", "KOA", "ITO", "MKK", "LNY")))
+
+hnl_coordinates <- airport_coordinates[airport_coordinates$airport == "HNL", c("lon", "lat")]
+
+lines_df <- data.frame(
+  lon = c(filtered_destinations$long, hnl_coordinates$lon),
+  lat = c(filtered_destinations$lat, hnl_coordinates$lat)
+)
+
+p <- ggplot() +
+  geom_polygon(data = ocean_polygon, aes(x = long, y = lat),
+               fill = "lightblue", color = "lightblue") +  # Fill the ocean with lightblue color
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               fill = "lightgreen", color = "darkgreen") +  # Fill land areas with lightgreen color
+  geom_point(data = filtered_destinations,
+             aes(x = long, y = lat, 
+                 text = paste("City:", DEST_CITY_NAME, "<br>",
+                              "Total Passengers:", Total_Passengers),
+                 color = ifelse(DEST_COUNTRY_NAME == "United States" & DEST != "HNL", "darkblue",
+                                ifelse(DEST == "HNL", "red", "black"))), # Conditional color for HNL and United States
+             fill = "violet", alpha = 0.9, shape = 21, stroke = 1, size = 3) +
+  scale_color_identity() + # Maintain the same color for all points
+  theme_void() +
+  coord_fixed() +
+  labs(title = "Map of all airports with flightlines to HNL(red), domestic(darkblue), and international(black))") +
+  geom_segment(data = lines_df, aes(x = lon, y = lat, xend = hnl_coordinates$lon, yend = hnl_coordinates$lat),
+               color = "red", size = 1, alpha = 0.1)  # Add lines connecting destinations to HNL with transparency
+
+ggplotly(p, tooltip = "text")
+
+```
+
+#Shiny dashboard of interactive map
+```{r}
+ui <- fluidPage(
+  titlePanel("Top Destinations by Total Passenger Volume"),
+  sidebarLayout(
+    sidebarPanel(
+    ),
+    mainPanel(
+      plotlyOutput("mapPlot")
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  output$mapPlot <- renderPlotly({
+ 
+    world_map <- map_data("world")
+    
+    p <- ggplot() +
+      geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+                   fill = "lightgreen", color = "darkgreen") + 
+      geom_point(data = pass_by_dest_city_map_filtered,
+                 aes(x = long, y = lat, size = Total_Passengers, 
+                     text = paste("City:", DEST_CITY_NAME, "<br>",
+                                  "Total Passengers:", Total_Passengers)),
+                 color = "black", fill = "violet", alpha = 0.9, shape = 21, stroke = 1) +
+      scale_size_continuous(name = "Passengers (in millions)",
+                            breaks = c(1, 1000000, 2000000, 4000000, 8000000, 16000000),
+                            labels = c(0.5, 1, 2, 4, 8, 16),
+                            limits = c(0, 20e6)) +
+      theme_void() +
+      coord_fixed() +
+      labs(title = "Map of Top Destinations by Total Passenger Volume\n(flights Involving Hawaii in 2000-2019)")
+
+    ggplotly(p, tooltip = "text")
+  })
+}
+
+#shinyApp(ui = ui, server = server)
+```
+
+
+#Shiny dashboard of interactive map
+```{r}
+ui <- fluidPage(
+  titlePanel("Top Destinations by Total Passenger Volume"),
+  sidebarLayout(
+    sidebarPanel(
+      
+    ),
+    mainPanel(
+      plotlyOutput("mapPlot1"),
+      plotlyOutput("mapPlot2")
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  output$mapPlot1 <- renderPlotly({
+    filtered_destinations <- pass_by_dest_city_map_filtered %>%
+      filter(!(DEST %in% c("OGG", "LIH", "KOA", "ITO", "MKK", "LNY")))
+    
+    world_map <- map_data("world")
+    
+    p1 <- ggplot() +
+      geom_polygon(data = ocean_polygon, aes(x = long, y = lat),
+                   fill = "lightblue", color = "lightblue") +  
+      geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+                   fill = "lightgreen", color = "darkgreen") + 
+      geom_point(data = filtered_destinations,
+                 aes(x = long, y = lat, 
+                     text = paste("City:", DEST_CITY_NAME, "<br>",
+                                  "Total Passengers:", Total_Passengers),
+                     color = ifelse(DEST_COUNTRY_NAME == "United States" & DEST != "HNL", "darkblue",
+                                    ifelse(DEST == "HNL", "red", "black"))), 
+                 fill = "violet", alpha = 0.9, shape = 21, stroke = 1, size = 3) +
+      scale_color_identity() + 
+      theme_void() +
+      coord_fixed() +
+      labs(title = "Map of Top Destinations by Total Passenger Volume\n(flights Involving Hawaii in 2000-2019)")
+    
+    ggplotly(p1, tooltip = "text")
+  })
+  
+  output$mapPlot2 <- renderPlotly({
+    
+    filtered_destinations <- pass_by_dest_city_map_filtered %>%
+      filter(!(DEST %in% c("OGG", "LIH", "KOA", "ITO", "MKK", "LNY")))
+    
+    hnl_coordinates <- airport_coordinates[airport_coordinates$airport == "HNL", c("lon", "lat")]
+    
+    lines_df <- data.frame(
+      lon = c(filtered_destinations$long, hnl_coordinates$lon),
+      lat = c(filtered_destinations$lat, hnl_coordinates$lat)
+    )
+    
+    world_map <- map_data("world")
+    
+    p2 <- ggplot() +
+      geom_polygon(data = ocean_polygon, aes(x = long, y = lat),
+                   fill = "lightblue", color = "lightblue") +  
+      geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+                   fill = "lightgreen", color = "darkgreen") +  
+      geom_point(data = filtered_destinations,
+                 aes(x = long, y = lat, 
+                     text = paste("City:", DEST_CITY_NAME, "<br>",
+                                  "Total Passengers:", Total_Passengers),
+                     color = ifelse(DEST_COUNTRY_NAME == "United States" & DEST != "HNL", "darkblue",
+                                    ifelse(DEST == "HNL", "red", "black"))), 
+                 fill = "violet", alpha = 0.9, shape = 21, stroke = 1, size = 3) +
+      scale_color_identity() + 
+      coord_fixed() +
+      labs(title = "Map of Top Destinations by Total Passenger Volume\n(flights Involving Hawaii in 2000-2019)") +
+      geom_segment(data = lines_df, aes(x = lon, y = lat, xend = hnl_coordinates$lon, yend = hnl_coordinates$lat),
+                   color = "red", size = 1, alpha = 0.1)  
+    
+    ggplotly(p2, tooltip = "text")
+  })
+}
+
+#shinyApp(ui = ui, server = server)
+```
+
+
+
+
+
+
+
+# Forecasting
+
+
+
+#Let's Try Doing Forecasting the Number of Passengers Arriving in Hawaii
+```{r}
+six_months <- hawaii_Dest %>%
+  group_by(YEAR, MONTH) %>%
+  summarize(total_passengers = sum(Sum_PASSENGERS), .groups = "drop")
+
+# Creating a Time Series for Number of Flights
+passengers_time_series <- ts(six_months$total_passengers, start = c(2000, 1), end = c(2019, 12), frequency = 12)
+autoplot(passengers_time_series) +
+  labs(title = "Time Series Plot for Passengers Into Hawaii",
+       x = "Time in Years",
+       y = "")
+```
+
+#Train test split
+```{r}
+N <- length(passengers_time_series)
+r <- 0.9
+T <- floor(r*N)
+S <- N - T
+passengers_tr <- head(passengers_time_series, T)
+passengers_ts <- tail(passengers_time_series, S)
+```
+
+#4 Basic Forecasting Models
+```{r}
+naive_passengers <- naive(passengers_time_series, h = S)
+drift_passengers <- rwf(passengers_time_series, h = S)
+mean_passengers <- mean(passengers_time_series, h = S)
+snaive_passengers <- snaive(passengers_time_series, h = S)
+```
+
+```{r}
+# Calculating the RMSE Scores
+error_cv_naive <- tsCV(passengers_time_series, naive, h = S)
+error_cv_naive_RMSE <- sqrt(mean((error_cv_naive[, S])^2, na.rm = TRUE))
+
+error_cv_drift <- tsCV(passengers_time_series, rwf, h = S, drift = TRUE)
+error_cv_drift_RMSE <- sqrt(mean((error_cv_drift[, S])^2, na.rm = TRUE))
+
+error_cv_snaive <- tsCV(passengers_time_series, snaive, h = S)
+error_cv_snaive_RMSE <- sqrt(mean((error_cv_snaive[, S])^2, na.rm = TRUE))
+
+print(paste("The RMSE value for Naive is", error_cv_naive_RMSE))
+print(paste("The RMSE value for Drift is", error_cv_drift_RMSE))
+print(paste("The RMSE value for SNaive is", error_cv_snaive_RMSE))
+
+autoplot(passengers_time_series) +
+  autolayer(naive_passengers$mean, series = "Naive", size = 0.75) +
+  autolayer(drift_passengers$mean, series = "Drift") +
+  autolayer(snaive_passengers$mean, series = "Seasonal Naive") + 
+  labs(title = "Benchmark Methods Forecasted",
+       color = "Methods",
+       x = "Time in Years", 
+       y = "Passengers going into Hawaii")
+```
+
+#ETS Models
+```{r}
+pass_ets <- ets(passengers_time_series, model = "ZZZ")
+pass_ets_fit <- forecast(pass_ets, h = 6)
+summary(pass_ets_fit)
+ autoplot(passengers_time_series) +
+  autolayer(pass_ets_fit, PI = TRUE, series = "ETS (M, Ad, M)") + 
+  labs(title = "ETS (M, Ad, M) Forecasted",
+       x = "Time in Years",
+       y = "Passengers going into Hawaii")
+```
+#ETS model testing
+```{r}
+summary(pass_ets_fit)
+checkresiduals(pass_ets_fit)
+```
+
+
+#testing if stationay
+```{r}
+summary(ur.kpss(passengers_time_series))
+```
+#decomposition
+```{r}
+pass_stl <- stl(passengers_time_series, t.window = 13, s.window = 'periodic')
+autoplot(pass_stl) + 
+  labs(title = "Decomposition of Passenger Time Series")
+```
+#Time series after first and seasonal differencing
+```{r}
+# Seasonally differenced and first differencied passenger time series
+passengers_time_series %>% diff(lag = 12) %>% diff() %>% ggtsdisplay()
+```
+#ARIMA
+```{r}
+pass_auto <- auto.arima(passengers_time_series, d = 1, D = 1, max.p = 3, max.q = 3, max.P = 2, max.Q = 2,lambda = 0, ic = "aicc", stepwise = FALSE)
+pass_auto_forecast <- forecast(pass_auto, h = 6)
+
+autoplot(passengers_time_series) +
+  autolayer(pass_auto_forecast, PI = TRUE, series = "ARIMA(2,1,0)(2,1,1)") +
+  labs(title = "ARIMA Forecasted",
+       x = "Time in Years", 
+       y = "Passengers going into Hawaii")
+```
+#ARIMA model testing
+```{r}
+summary(pass_auto_forecast)
+checkresiduals(pass_auto_forecast)
+```
+
+#Dynamic Regression
+```{r}
+lowest_index <- which.min(passengers_time_series)
+ 
+x <- rep(0, length(passengers_time_series))
+x[lowest_index:length(passengers_time_series)] <- 1
+ 
+fit <- auto.arima(passengers_time_series, xreg = x,  d = 1, D = 1, max.p = 3, max.q = 3, max.P = 2, max.Q = 2,lambda = 0, ic = "aicc", stepwise = FALSE)
+ 
+forecast <- forecast(fit, xreg = c(1,1,1,1,1,1), h = 6)  
+ 
+autoplot(forecast, PI = TRUE) +
+  labs(title = "Dynamic Regression Forecast for Passengers Into Hawaii",
+       x = "Time in Years", 
+       y = "Passengers going into Hawaii")
+hawaii_arima_reg <- auto.arima(passengers_time_series, xreg = x)
+ 
+cv_forecastDR <- function(y, h, xreg, newxreg) {
+  arima_model <- Arima(y, xreg = xreg, order = c(2, 1, 0), seasonal = c(2, 1, 1), lambda = NULL)
+  forecast_values <- forecast(arima_model, xreg = as.matrix(newxreg), h=h)
+  return(forecast_values)
+}
+ 
+print(hawaii_arima_reg)
+```
+```{r}
+checkresiduals(fit)
+```
+
+
+#cross validation and RMSE
+```{r}
+cv_forecastDR(passengers_time_series, h=6, xreg=x, newxreg=as.matrix(c(1,1,1,1,1,1)))
+cv_error <- tsCV(passengers_time_series, cv_forecastDR, xreg = x, h = 1)
+
+RMSE_dynamic_regression <- sqrt(mean(cv_error^2, na.rm = TRUE))
+RMSE_dynamic_regression
+```
+
+```{r}
+rmse_data <- data.frame(
+  Method = c("Naive", "Drift", "Seasonal Naive", "ETS", "ARIMA", "Dynamic Regression"),
+  RMSE = c(97155.88, 350608.20, 92301.84, 35847.73, 34559.95, 28796.69)
+)
+
+kable(rmse_data, caption = "RMSE Comparison of Forecasting Methods")
+```
+
+
+
+
+# Conclusion
+
+#In conclusion for our predicting passengers to Hawaii for the next six months the dynamic regression method appears to be the most suitable choice for forecasting passenger volume into Hawaii, closely followed by the ARIMA and ETS methods. These findings suggest that employing more sophisticated forecasting techniques can lead to more accurate predictions, contributing to better decision-making processes in managing passenger traffic coming to Hawaii. With this information the airports of Hawaii could suggest expanding other airports to allow for more air travel to account for more passenegers coming to one airport, as well as the potential to expand the currently heavy trafficed HNL airport.
+
+
